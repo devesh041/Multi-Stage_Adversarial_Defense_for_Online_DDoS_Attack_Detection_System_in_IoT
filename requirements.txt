@@ -1,0 +1,19 @@
+# MSAAD — Python Requirements
+# Generated for Python 3.10+
+
+# Core ML / streaming
+river>=0.26.0
+scikit-learn>=1.9.0
+numpy>=2.0.0
+scipy>=1.18.0
+pandas>=3.0.0
+
+# Deep learning (GAN + PyTorch ART surrogate)
+torch>=2.14.0
+
+# Adversarial attacks
+adversarial-robustness-toolbox>=1.20.0
+packaging>=26.0           # required by ART 1.20
+
+# Utilities
+tqdm>=4.70.0

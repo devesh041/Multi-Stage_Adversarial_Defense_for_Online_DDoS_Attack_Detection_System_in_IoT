@@ -1,0 +1,12 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Temporary evaluation logs (keep folder structure)
+results/*.log
+
+# Environment
+.venv/
+env/
+venv/
