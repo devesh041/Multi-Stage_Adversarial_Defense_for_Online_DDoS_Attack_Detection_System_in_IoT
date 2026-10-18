@@ -1,10 +1,12 @@
 """
 classifiers.py — Phase 3 Layer 2: Online base classifiers with concept drift detection.
 
-Three streaming classifiers:
-  1. ARF-ADWIN  — Adaptive Random Forest (ADWIN Bagging) with drift detection
-  2. SRP-DDM    — Streaming Random Patches with DDM drift detector
-  3. KNN-ADWIN  — K-Nearest Neighbours with ADWIN drift detection
+Five streaming classifiers:
+  1. ARF-ADWIN    — Adaptive Random Forest (ADWIN Bagging) with drift detection
+  2. SRP-DDM      — Streaming Random Patches with DDM drift detector
+  3. HT-ADWIN     — Hoeffding Tree with ADWIN drift detection
+  4. KNN-ADWIN    — K-Nearest Neighbours with ADWIN drift detection
+  5. OLR          — Online Logistic Regression (incremental SGD)
 
 Each exposes a unified interface:
   .learn_one(x: dict, y: int) -> None
@@ -23,10 +25,13 @@ from river.tree import HoeffdingTreeClassifier
 from river.neighbors import KNNClassifier
 from river.drift import ADWIN
 from river.drift.binary import DDM
+from river.linear_model import LogisticRegression
+from river.preprocessing import StandardScaler
 
 from msaad.config import (
     ARF_N_MODELS, SRP_N_MODELS,
     KNN_N_NEIGHBORS, KNN_WINDOW_SIZE,
+    OLR_LEARNING_RATE,
 )
 
 
@@ -118,7 +123,49 @@ class SRPDDMClassifier(BaseOnlineClassifier):
 
 
 # ─────────────────────────────────────────────────────────────
-#  Classifier 3: KNN-ADWIN
+#  Classifier 3: HT-ADWIN (Hoeffding Tree with ADWIN drift detection)
+# ─────────────────────────────────────────────────────────────
+
+class HTADWINClassifier(BaseOnlineClassifier):
+    """
+    Standalone Hoeffding Tree with an external ADWIN drift detector.
+
+    When ADWIN detects drift, the tree is re-initialised to adapt
+    to the new concept.
+    """
+
+    name = "HT-ADWIN"
+
+    def __init__(self):
+        self._clf = HoeffdingTreeClassifier()
+        self._adwin = ADWIN()
+
+    def learn_one(self, x: dict, y: int) -> None:
+        pred = self.predict_one(x)
+        error = int(pred != y)
+        self._adwin.update(error)
+
+        if self._adwin.drift_detected:
+            # Reset tree on drift to discard stale concept
+            self._clf = HoeffdingTreeClassifier()
+
+        self._clf.learn_one(x, y)
+
+    def predict_proba_one(self, x: dict) -> float:
+        proba_dict = self._clf.predict_proba_one(x)
+        if proba_dict is None:
+            return 0.5
+        return float(proba_dict.get(1, 0.0))
+
+    def predict_one(self, x: dict) -> int:
+        result = self._clf.predict_one(x)
+        if result is None:
+            return 0
+        return int(result)
+
+
+# ─────────────────────────────────────────────────────────────
+#  Classifier 4: KNN-ADWIN
 # ─────────────────────────────────────────────────────────────
 
 class KNNADWINClassifier(BaseOnlineClassifier):
@@ -165,6 +212,50 @@ class KNNADWINClassifier(BaseOnlineClassifier):
         return int(result)
 
 
+# ─────────────────────────────────────────────────────────────
+#  Classifier 5: Online Logistic Regression
+# ─────────────────────────────────────────────────────────────
+
+class OnlineLogisticRegressionClassifier(BaseOnlineClassifier):
+    """
+    Online Logistic Regression using river's incremental SGD implementation.
+
+    A StandardScaler pipeline is prepended so that the linear model
+    receives normalised features (important for gradient-based updates).
+    """
+
+    name = "OLR"
+
+    def __init__(self, learning_rate: float = OLR_LEARNING_RATE):
+        from river import compose
+        self._clf = compose.Pipeline(
+            StandardScaler(),
+            LogisticRegression(optimizer=None, l2=0.01),
+        )
+        # Override the default optimizer with a fixed learning rate
+        self._clf[-1].optimizer = self._make_optimizer(learning_rate)
+
+    @staticmethod
+    def _make_optimizer(lr: float):
+        """Create an SGD optimizer with the given learning rate."""
+        from river.optim import SGD
+        return SGD(lr=lr)
+
+    def learn_one(self, x: dict, y: int) -> None:
+        self._clf.learn_one(x, y)
+
+    def predict_proba_one(self, x: dict) -> float:
+        proba_dict = self._clf.predict_proba_one(x)
+        if proba_dict is None:
+            return 0.5
+        return float(proba_dict.get(1, 0.0))
+
+    def predict_one(self, x: dict) -> int:
+        result = self._clf.predict_one(x)
+        if result is None:
+            return 0
+        return int(result)
+
 
 # ─────────────────────────────────────────────────────────────
 #  Layer 2 container
@@ -172,7 +263,7 @@ class KNNADWINClassifier(BaseOnlineClassifier):
 
 class Layer2Classifiers:
     """
-    Container for all three base classifiers.
+    Container for all five base classifiers.
     Provides unified learn/predict interface used by Layer 3.
     """
 
@@ -180,7 +271,9 @@ class Layer2Classifiers:
         self.classifiers: list[BaseOnlineClassifier] = [
             ARFADWINClassifier(),
             SRPDDMClassifier(),
+            HTADWINClassifier(),
             KNNADWINClassifier(),
+            OnlineLogisticRegressionClassifier(),
         ]
         self.names = [c.name for c in self.classifiers]
 

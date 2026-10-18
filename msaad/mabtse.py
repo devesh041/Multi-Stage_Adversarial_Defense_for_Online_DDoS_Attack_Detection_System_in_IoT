@@ -1,8 +1,9 @@
 """
-mabtse.py — Phase 3 Layer 3: Multi-Armed Bandit Thompson Sampling with Ensemble (MABTSE)
+mabtse.py — Phase 3 Layer 3: Multi-Armed Bandit LinUCB with Ensemble (MABLUCBE)
 
 Implements:
-  - Thompson Sampling MAB to dynamically select the best classifier arm
+  - LinUCB (Linear Upper Confidence Bound) contextual bandit to dynamically
+    select the best classifier arm based on input feature context
   - Arms: ARF-ADWIN (0), SRP-DDM (1), KNN-ADWIN (2), Ensemble (3)
   - AUWPAE: Accuracy Update Weighted Probability Averaging Ensemble
     (used when the Ensemble arm is selected)
@@ -16,53 +17,125 @@ from typing import Optional
 
 from msaad.classifiers import Layer2Classifiers
 from msaad.config import (
-    MAB_ALPHA_INIT, MAB_BETA_INIT,
+    LINUCB_ALPHA,
     MAB_ARM_NAMES, AUWPAE_WINDOW_SIZE,
+    LINUCB_CONTEXT_DIM,
 )
 
 
 # ─────────────────────────────────────────────────────────────
-#  Thompson Sampling MAB
+#  LinUCB Contextual Bandit
 # ─────────────────────────────────────────────────────────────
 
-class ThompsonSamplingMAB:
+class LinUCBMAB:
     """
-    Multi-Armed Bandit with Beta-Bernoulli Thompson Sampling.
+    Contextual Multi-Armed Bandit using the LinUCB (Disjoint) algorithm.
+
+    Each arm maintains its own ridge-regression model that maps a
+    d-dimensional context vector to an expected reward.  Arm selection
+    maximises  θ_a^T x  +  α √(x^T A_a^{-1} x),  balancing exploitation
+    (predicted reward) against exploration (uncertainty).
 
     Arms:
       0 → ARF-ADWIN
       1 → SRP-DDM
-      2 → KNN-ADWIN
-      3 → Ensemble (AUWPAE)
+      2 → HT-ADWIN
+      3 → KNN-ADWIN
+      4 → OLR
+      5 → Ensemble (AUWPAE)
 
     Reward: 1 if the arm's prediction is correct, 0 otherwise.
+
+    Reference:
+      Li et al., "A Contextual-Bandit Approach to Personalized News
+      Article Recommendation", WWW 2010.
     """
 
     def __init__(
         self,
-        n_arms: int = 4,
-        alpha_init: float = MAB_ALPHA_INIT,
-        beta_init: float = MAB_BETA_INIT,
+        n_arms: int = 6,
+        d: int = LINUCB_CONTEXT_DIM,
+        alpha: float = LINUCB_ALPHA,
     ):
         self.n_arms = n_arms
-        # Beta distribution parameters per arm
-        self._alpha = np.full(n_arms, alpha_init)
-        self._beta  = np.full(n_arms, beta_init)
+        self.d = d
+        self.alpha = alpha
+
+        # Per-arm parameters: A_a (d×d), b_a (d,)
+        self._A = [np.eye(d) for _ in range(n_arms)]       # A_a = I_d
+        self._b = [np.zeros(d) for _ in range(n_arms)]     # b_a = 0
+        self._A_inv = [np.eye(d) for _ in range(n_arms)]   # cached inverse
+
         self._pull_counts = np.zeros(n_arms, dtype=np.int64)
         self._reward_sums = np.zeros(n_arms, dtype=np.float64)
 
-    def select_arm(self) -> int:
-        """Sample θ_i ~ Beta(α_i, β_i) for each arm; return argmax."""
-        samples = np.array([
-            np.random.beta(self._alpha[i], self._beta[i])
-            for i in range(self.n_arms)
-        ])
-        return int(np.argmax(samples))
+    def _build_context(self, x: dict) -> np.ndarray:
+        """
+        Convert a feature dictionary to a fixed-size context vector.
 
-    def update(self, arm: int, reward: float) -> None:
-        """Update Beta posterior with Bernoulli reward."""
-        self._alpha[arm] += reward
-        self._beta[arm]  += (1.0 - reward)
+        Uses a deterministic hash-based projection to map variable-length
+        feature dicts into a fixed d-dimensional vector, followed by
+        L2 normalisation for numerical stability.
+        """
+        raw = np.array(list(x.values()), dtype=np.float64)
+
+        if len(raw) >= self.d:
+            # Truncate to d dimensions
+            ctx = raw[:self.d].copy()
+        else:
+            # Pad with zeros
+            ctx = np.zeros(self.d, dtype=np.float64)
+            ctx[:len(raw)] = raw
+
+        # L2-normalise to keep UCB numerically stable
+        norm = np.linalg.norm(ctx)
+        if norm > 0:
+            ctx /= norm
+
+        return ctx
+
+    def select_arm(self, x: dict) -> int:
+        """
+        Select the arm with the highest LinUCB upper confidence bound.
+
+        UCB_a = θ_a^T context  +  α √(context^T A_a^{-1} context)
+
+        Args:
+            x: Feature dictionary for the current sample.
+
+        Returns:
+            Index of the selected arm.
+        """
+        ctx = self._build_context(x)
+        ucb_values = np.empty(self.n_arms)
+
+        for a in range(self.n_arms):
+            A_inv = self._A_inv[a]
+            theta_a = A_inv @ self._b[a]                 # θ_a = A_a^{-1} b_a
+            pred = float(theta_a @ ctx)                   # exploitation
+            var = float(ctx @ A_inv @ ctx)                # uncertainty
+            ucb_values[a] = pred + self.alpha * np.sqrt(max(var, 0.0))
+
+        return int(np.argmax(ucb_values))
+
+    def update(self, arm: int, reward: float, x: dict) -> None:
+        """
+        Update the arm's ridge-regression model after observing a reward.
+
+        A_a ← A_a + x x^T
+        b_a ← b_a + r x
+        """
+        ctx = self._build_context(x)
+
+        self._A[arm] += np.outer(ctx, ctx)
+        self._b[arm] += reward * ctx
+
+        # Incrementally update the inverse via Sherman-Morrison
+        A_inv = self._A_inv[arm]
+        u = A_inv @ ctx
+        denom = 1.0 + float(ctx @ u)
+        self._A_inv[arm] = A_inv - np.outer(u, u) / denom
+
         self._pull_counts[arm] += 1
         self._reward_sums[arm] += reward
 
@@ -138,38 +211,39 @@ class AUWPAE:
 
 
 # ─────────────────────────────────────────────────────────────
-#  MABTSE: Full Layer 3 Orchestrator
+#  MABLUCBE: Full Layer 3 Orchestrator
 # ─────────────────────────────────────────────────────────────
 
 class MABTSERouter:
     """
-    Multi-Armed Bandit Thompson Sampling Ensemble (MABTSE) — Layer 3.
+    Multi-Armed Bandit LinUCB Ensemble (MABLUCBE) — Layer 3.
 
     Per incoming sample:
-      1. MAB selects an arm (0-2: individual classifier, 3: ensemble)
+      1. LinUCB selects an arm using the sample's feature context
+         (0-4: individual classifier, 5: ensemble)
       2. Prediction is made:
-         - If arm 0-2: use the corresponding base classifier directly
-         - If arm 3: use AUWPAE over all three classifiers
-      3. After observing the true label, MAB receives reward and
+         - If arm 0-4: use the corresponding base classifier directly
+         - If arm 5: use AUWPAE over all five classifiers
+      3. After observing the true label, LinUCB receives a reward and
          AUWPAE accuracy windows are updated.
     """
 
-    ENSEMBLE_ARM = 3
+    ENSEMBLE_ARM = 5
 
     def __init__(self, layer2: Layer2Classifiers):
         self.layer2 = layer2
         self.n_classifiers = len(layer2)
-        self.mab = ThompsonSamplingMAB(n_arms=4)
+        self.mab = LinUCBMAB(n_arms=6)
         self.auwpae = AUWPAE(n_classifiers=self.n_classifiers)
 
     def predict_one(self, x: dict) -> tuple[int, int, float]:
         """
-        Make a prediction using Thompson Sampling arm selection.
+        Make a prediction using LinUCB contextual arm selection.
 
         Returns:
             (prediction, arm_selected, confidence_proba)
         """
-        arm = self.mab.select_arm()
+        arm = self.mab.select_arm(x)
 
         probas = self.layer2.predict_probas_one(x)
 
@@ -184,12 +258,12 @@ class MABTSERouter:
 
     def learn_one(self, x: dict, y: int) -> tuple[int, int]:
         """
-        Make prediction, update base classifiers, update MAB and AUWPAE.
+        Make prediction, update base classifiers, update LinUCB and AUWPAE.
 
         Returns:
             (prediction, arm_selected)
         """
-        arm = self.mab.select_arm()
+        arm = self.mab.select_arm(x)
         probas = self.layer2.predict_probas_one(x)
 
         if arm == self.ENSEMBLE_ARM:
@@ -204,7 +278,7 @@ class MABTSERouter:
 
         # Reward = 1 if correct prediction
         reward = float(pred == y)
-        self.mab.update(arm, reward)
+        self.mab.update(arm, reward, x)
 
         # Update AUWPAE accuracy windows
         clf_preds = [int(p >= 0.5) for p in probas]

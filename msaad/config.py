@@ -110,11 +110,13 @@ ARF_N_MODELS             = 10
 SRP_N_MODELS             = 10
 KNN_N_NEIGHBORS          = 5
 KNN_WINDOW_SIZE          = 500
+OLR_LEARNING_RATE        = 0.01     # Online Logistic Regression SGD learning rate
 
 # ─────────────────────────────────────────────
-#  Phase 3 Layer 3 — Thompson Sampling MAB
+#  Phase 3 Layer 3 — LinUCB Contextual Bandit
 # ─────────────────────────────────────────────
-MAB_ALPHA_INIT           = 1.0      # Beta prior alpha
-MAB_BETA_INIT            = 1.0      # Beta prior beta
-MAB_ARM_NAMES            = ["ARF-ADWIN", "SRP-DDM", "KNN-ADWIN", "Ensemble"]
+LINUCB_ALPHA             = 1.0      # UCB exploration coefficient (higher = more exploration)
+LINUCB_CONTEXT_DIM       = 16       # dimensionality of the projected context vector
+MAB_ARM_NAMES            = ["ARF-ADWIN", "SRP-DDM", "HT-ADWIN", "KNN-ADWIN", "OLR", "Ensemble"]
 AUWPAE_WINDOW_SIZE       = 200      # sliding window for per-classifier accuracy weighting
+

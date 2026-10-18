@@ -115,7 +115,7 @@ class MSAADSystem:
           - Seed the preprocessing pipeline
           - Build the ART surrogate model
           - Collect clean + adversarial arrays for RADP pre-training
-          - Initialize Layer 2 classifiers and MABTSE router
+          - Initialize Layer 2 classifiers and LinUCB router
         """
         print(f"[WARMUP] Starting warm-up on {n_samples} samples...")
         count = 0
@@ -174,8 +174,8 @@ class MSAADSystem:
             x_dict = self._array_to_dict(arr)
             self.layer2.learn_one(x_dict, lbl)
 
-        # Initialize MABTSE router
-        print("[WARMUP] Initializing MABTSE router...")
+        # Initialize LinUCB router
+        print("[WARMUP] Initializing LinUCB router...")
         self.router = MABTSERouter(self.layer2)
         print("[WARMUP] Complete.\n")
 
