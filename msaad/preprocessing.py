@@ -190,8 +190,9 @@ class MiniBatchKMeansAugmentor:
         centers = self._kmeans.cluster_centers_  # (n_clusters, n_features)
         dists = np.linalg.norm(centers - arr, axis=1)  # (n_clusters,)
         out = dict(x)
+        max_d = float(np.max(dists)) if len(dists) > 0 and np.max(dists) > 0 else 1.0
         for i, d in enumerate(dists):
-            out[f"__km_dist_{i}"] = float(d)
+            out[f"__km_dist_{i}"] = float(d / max_d)
         return out
 
     def learn_transform_one(self, x: dict) -> dict:
@@ -219,17 +220,19 @@ class OnlineSMOTE:
         self.k = k
         self.reservoir_size = reservoir_size
         self.target_ratio = target_ratio
-        self._reservoirs: dict[int, list] = {0: [], 1: []}
-        self._counts: dict[int, int] = {0: 0, 1: 0}
+        self._reservoirs: dict[int, list] = defaultdict(list)
+        self._counts: dict[int, int] = defaultdict(int)
+        self._seen: dict[int, int] = defaultdict(int)
 
     def _add_to_reservoir(self, label: int, x: dict) -> None:
+        self._seen[label] += 1
         r = self._reservoirs[label]
-        r.append(x)
-        if len(r) > self.reservoir_size:
-            # Random replacement to keep reservoir fresh
-            idx = random.randint(0, len(r) - 1)
-            r[idx] = r[-1]
-            r.pop()
+        if len(r) < self.reservoir_size:
+            r.append(x)
+        else:
+            j = random.randint(0, self._seen[label] - 1)
+            if j < self.reservoir_size:
+                r[j] = x
 
     def _synthesize(self, label: int) -> dict | None:
         r = self._reservoirs[label]
@@ -253,12 +256,15 @@ class OnlineSMOTE:
 
         results = [(x, y)]
 
+        if len(self._counts) < 2:
+            return results
+
         maj = max(self._counts, key=lambda k: self._counts[k])
-        minority = 1 - maj
+        minority = min(self._counts, key=lambda k: self._counts[k])
         maj_count = self._counts[maj]
         min_count = self._counts[minority]
 
-        if maj_count == 0:
+        if maj_count == 0 or minority == maj:
             return results
 
         ratio = min_count / maj_count
@@ -355,7 +361,7 @@ class OnlineInfoGainSelector:
         """Drop features whose IG is below threshold (if we have enough data)."""
         if self._total < 200:
             return x  # not enough data to estimate IG reliably yet
-        return {k: v for k, v in x.items() if k in self._dropped or self._info_gain(k) >= self.threshold}
+        return {k: v for k, v in x.items() if k not in self._dropped}
 
     def update_dropped(self) -> None:
         """Periodically recompute the set of features to drop."""
@@ -365,7 +371,7 @@ class OnlineInfoGainSelector:
 
     def learn_transform_one(self, x: dict, y: int) -> dict:
         self.learn_one(x, y)
-        if self._total % 500 == 0:
+        if self._total == 200 or self._total % 500 == 0:
             self.update_dropped()
         return self.transform_one(x)
 
@@ -378,61 +384,75 @@ class OnlinePearsonDeduplicator:
     """
     Removes one of each highly correlated feature pair online.
     Uses Welford's online algorithm for variance and covariance.
+    Vectorized with numpy to maintain high streaming throughput.
     """
 
     def __init__(self, threshold: float = PEARSON_THRESHOLD):
         self.threshold = threshold
         self._n = 0
-        self._mean: dict[str, float] = defaultdict(float)
-        self._M2: dict[str, float] = defaultdict(float)      # variance accumulator
-        self._cov: dict[tuple, float] = defaultdict(float)   # covariance accumulator
         self._keys: list[str] = []
+        self._mean: Optional[np.ndarray] = None
+        self._M2: Optional[np.ndarray] = None
+        self._C: Optional[np.ndarray] = None
         self._dropped: set[str] = set()
 
     def learn_one(self, x: dict) -> None:
         self._n += 1
         keys = sorted(x.keys())
-        if not self._keys:
+        if not self._keys or keys != self._keys:
+            old_keys = self._keys
             self._keys = keys
-        delta: dict[str, float] = {}
-        for k in keys:
-            v = float(x.get(k, 0.0))
-            old_mean = self._mean[k]
-            self._mean[k] += (v - old_mean) / self._n
-            delta[k] = v - old_mean
-            delta2 = v - self._mean[k]
-            self._M2[k] += delta[k] * delta2
+            d = len(keys)
+            new_mean = np.zeros(d, dtype=np.float64)
+            new_M2 = np.zeros(d, dtype=np.float64)
+            new_C = np.zeros((d, d), dtype=np.float64)
+            if old_keys and self._mean is not None and self._M2 is not None and self._C is not None:
+                old_map = {k: i for i, k in enumerate(old_keys)}
+                for i, k in enumerate(keys):
+                    if k in old_map:
+                        oi = old_map[k]
+                        new_mean[i] = self._mean[oi]
+                        new_M2[i] = self._M2[oi]
+                for i, ki in enumerate(keys):
+                    if ki in old_map:
+                        oi = old_map[ki]
+                        for j, kj in enumerate(keys):
+                            if kj in old_map:
+                                oj = old_map[kj]
+                                new_C[i, j] = self._C[oi, oj]
+            self._mean = new_mean
+            self._M2 = new_M2
+            self._C = new_C
 
-        # Update covariance for all pairs
-        for i, ki in enumerate(keys):
-            for kj in keys[i + 1:]:
-                vi = float(x.get(ki, 0.0))
-                vj = float(x.get(kj, 0.0))
-                di = vi - self._mean[ki]
-                dj = vj - self._mean[kj]
-                self._cov[(ki, kj)] += (di * dj - self._cov[(ki, kj)]) / self._n
-
-    def _pearson(self, ki: str, kj: str) -> float:
-        cov = self._cov.get((ki, kj), self._cov.get((kj, ki), 0.0))
-        var_i = self._M2.get(ki, 0.0) / max(self._n - 1, 1)
-        var_j = self._M2.get(kj, 0.0) / max(self._n - 1, 1)
-        denom = math.sqrt(var_i * var_j)
-        if denom == 0:
-            return 0.0
-        return cov / denom
+        v = np.array([float(x.get(k, 0.0)) for k in self._keys], dtype=np.float64)
+        delta_old = v - self._mean
+        self._mean += delta_old / self._n
+        delta_new = v - self._mean
+        self._M2 += delta_old * delta_new
+        self._C += np.outer(delta_old, delta_new)
 
     def update_dropped(self) -> None:
-        if self._n < 300:
+        if self._n < 300 or self._M2 is None or self._C is None or len(self._keys) < 2:
             return
+        C_sym = 0.5 * (self._C + self._C.T)
+        std = np.sqrt(np.maximum(self._M2, 1e-12))
+        std_matrix = np.outer(std, std)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            corr = np.where(std_matrix > 0, C_sym / std_matrix, 0.0)
+            np.fill_diagonal(corr, 1.0)
+            corr = np.nan_to_num(corr, nan=0.0)
+
         new_dropped: set[str] = set()
-        keys = self._keys
-        for i, ki in enumerate(keys):
+        n_feats = len(self._keys)
+        for i in range(n_feats):
+            ki = self._keys[i]
             if ki in new_dropped:
                 continue
-            for kj in keys[i + 1:]:
+            for j in range(i + 1, n_feats):
+                kj = self._keys[j]
                 if kj in new_dropped:
                     continue
-                if abs(self._pearson(ki, kj)) >= self.threshold:
+                if abs(corr[i, j]) >= self.threshold:
                     new_dropped.add(kj)  # drop the second of the pair
         self._dropped = new_dropped
 
@@ -443,7 +463,7 @@ class OnlinePearsonDeduplicator:
 
     def learn_transform_one(self, x: dict) -> dict:
         self.learn_one(x)
-        if self._n % 500 == 0:
+        if self._n == 300 or self._n % 500 == 0:
             self.update_dropped()
         return self.transform_one(x)
 

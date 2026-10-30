@@ -44,7 +44,7 @@ def get_stream(dataset: str, split: str = "train"):
     if dataset == "ciciot23":
         return stream_ciciot23(split=split)
     elif dataset == "iotid20":
-        return stream_iotid20()
+        return stream_iotid20(split=split)
     elif dataset == "cybersecurity":
         return stream_cybersecurity()
     else:
@@ -82,12 +82,15 @@ def run_evaluation(
         print(f"  Attack Method: {atk_label}")
         print(f"{'-'*55}")
 
+        last_sys = system
+
         # ── Scenario 1: Original ─────────────────────────────
         if scenario in ("original", "all"):
             sys1 = copy.deepcopy(system)
             stream_orig = get_stream(dataset, split="test")
             m = sys1.run_original(stream_orig, max_samples=samples)
             results[f"Original ({atk_label})"] = m
+            last_sys = sys1
 
         # ── Scenario 2: Under Attack ─────────────────────────
         if scenario in ("attack", "all"):
@@ -95,6 +98,7 @@ def run_evaluation(
             stream_atk = get_stream(dataset, split="test")
             m = sys2.run_under_attack(stream_atk, attack_method=atk, max_samples=samples)
             results[f"Under Attack ({atk_label})"] = m
+            last_sys = sys2
 
         # ── Scenario 3: Recovered ────────────────────────────
         if scenario in ("recovered", "all"):
@@ -102,19 +106,21 @@ def run_evaluation(
             stream_rec = get_stream(dataset, split="test")
             m = sys3.run_recovered(stream_rec, attack_method=atk, max_samples=samples)
             results[f"Recovered ({atk_label})"] = m
+            last_sys = sys3
 
     # ── Output ───────────────────────────────────────────────
     print_results_table(results)
     save_results_csv(results, dataset_name=dataset)
 
-    # MAB arm summary (from last system instance)
-    try:
-        print("  MAB Arm Statistics:")
-        for arm_name, stats in sys3.router.arm_summary.items():
-            print(f"    {arm_name:15s}  pulls={stats['pulls']:5d}  "
-                  f"success_rate={stats['success_rate']:.4f}")
-    except Exception:
-        pass
+    # MAB arm summary (from last active system instance)
+    if last_sys is not None and last_sys.router is not None:
+        try:
+            print("  MAB Arm Statistics:")
+            for arm_name, stats in last_sys.router.arm_summary.items():
+                print(f"    {arm_name:15s}  pulls={stats['pulls']:5d}  "
+                      f"success_rate={stats['success_rate']:.4f}")
+        except Exception:
+            pass
     print()
 
 

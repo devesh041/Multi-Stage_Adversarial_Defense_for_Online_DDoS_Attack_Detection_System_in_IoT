@@ -10,3 +10,11 @@ results/*.log
 .venv/
 env/
 venv/
+
+
+# CIC IoT 2023 Dataset (8.9 GB)
+CICIOT23/
+
+# IoT Network Intrusion Dataset (5.2 GB)
+IoT Network Intrusion Dataset.csv
+

@@ -34,7 +34,9 @@ from msaad.config import (
     ART_BUFFER_SIZE, MINI_BATCH_SIZE,
 )
 
-warnings.filterwarnings("ignore")
+# Suppress noisy library-specific deprecation warnings while retaining system warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="art")
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 
 # ─────────────────────────────────────────────────────────────

@@ -302,17 +302,20 @@ class MSAADSystem:
             if count % MINI_BATCH_SIZE == 0:
                 self.radp.online_update_gan(arr_batch, arr_adv)
 
-            if is_pruned:
-                # Pruned: use clean preprocessed sample instead
-                pruned += 1
-                x_dict = self._array_to_dict(arr)
-            else:
-                x_dict = self._array_to_dict(arr_adv_flat)
-
             t0 = time.perf_counter()
-            pred, arm = self.router.learn_one(x_dict, y)
-            total_learn_ms += (time.perf_counter() - t0) * 1000
+            if is_pruned:
+                # Pruned: Layer 1 RADP detected adversarial attack.
+                # Flagged as attack (DDoS=1) and filtered/dropped to protect Layer 2.
+                pruned += 1
+                pred = 1
+                learn_time = (time.perf_counter() - t0) * 1000
+            else:
+                # Evaded Layer 1: passed through to Layer 2/3 ensemble
+                x_dict = self._array_to_dict(arr_adv_flat)
+                pred, arm = self.router.learn_one(x_dict, y)
+                learn_time = (time.perf_counter() - t0) * 1000
 
+            total_learn_ms += learn_time
             y_true.append(y)
             y_pred.append(pred)
             count += 1

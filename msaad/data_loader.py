@@ -96,23 +96,37 @@ def stream_ciciot23(
 # ─────────────────────────────────────────────────────────────
 
 def stream_iotid20(
+    split: str = "train",
     max_samples: int | None = None,
 ) -> Generator[tuple[dict, int], None, None]:
     """
     Stream (features, label) from the IoT Network Intrusion Dataset.
-    Metadata columns (IP addresses, timestamps, Flow_ID) are dropped.
+    Metadata columns (IP addresses, timestamps, Flow_ID) and label columns are dropped.
+    Supports split='train' (warmup) and split='test' (evaluation on unseen data).
     """
     if not os.path.exists(IOTID20_MAIN):
         raise FileNotFoundError(f"IoTID20 main file not found: {IOTID20_MAIN}")
 
+    # To ensure test evaluations run on completely unseen data from train/warmup,
+    # test split skips the first 1,000 accepted samples (used for warmup).
+    skip_samples = 1000 if split == "test" else 0
+
     count = 0
+    skipped = 0
     with open(IOTID20_MAIN, newline="", encoding="utf-8", errors="replace") as fh:
         reader = csv.DictReader(fh)
         for row in reader:
             raw_label = row.get(IOTID20_LABEL_COL, "")
-            binary = iotid20_label_to_binary(raw_label)
+            raw_cat = row.get("Cat", "")
+            raw_sub = row.get("Sub_Cat", "")
+            binary = iotid20_label_to_binary(raw_label, raw_cat, raw_sub)
             if binary is None:
                 continue
+
+            if skipped < skip_samples:
+                skipped += 1
+                continue
+
             features = _row_to_features(row, IOTID20_LABEL_COL, IOTID20_DROP_COLS)
             yield features, binary
             count += 1

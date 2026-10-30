@@ -128,9 +128,8 @@ class AdversarialGAN:
 
         # Sample real adversarial batch
         idx_adv = np.random.choice(n_adv, batch_size, replace=False)
-        real_adv = torch.tensor(
-            [self._adv_buffer[i] for i in idx_adv], dtype=torch.float32
-        ).to(self.device)
+        real_adv_np = np.array([self._adv_buffer[i] for i in idx_adv], dtype=np.float32)
+        real_adv = torch.tensor(real_adv_np, dtype=torch.float32).to(self.device)
 
         # ── Train Discriminator ──────────────────────────────
         self.opt_D.zero_grad()
@@ -281,19 +280,20 @@ class RADPLayer:
         """
         self.gan.warmup(X_adv, X_clean)
 
-        # Train RAD: clean=0, adversarial=1
+        # Train RAD: clean=0, adversarial=1 (shuffled to avoid online SGD ordering bias)
         n = min(len(X_clean), len(X_adv))
         if n > 0:
             X_all = np.vstack([X_clean[:n], X_adv[:n]])
             y_all = np.array([0] * n + [1] * n, dtype=np.int32)
-            self.rad.train_batch(X_all, y_all)
+            idx = np.random.permutation(len(y_all))
+            self.rad.train_batch(X_all[idx], y_all[idx])
 
-        # Also use GAN-generated synthetic adversarial for additional training
-        syn_adv = self.gan.generate_synthetic_adversarial(n)
-        self.rad.train_batch(
-            np.vstack([X_clean[:n], syn_adv[:n]]),
-            np.array([0] * n + [1] * n, dtype=np.int32),
-        )
+            # Also use GAN-generated synthetic adversarial for additional training
+            syn_adv = self.gan.generate_synthetic_adversarial(n)
+            X_syn = np.vstack([X_clean[:n], syn_adv[:n]])
+            y_syn = np.array([0] * n + [1] * n, dtype=np.int32)
+            idx_syn = np.random.permutation(len(y_syn))
+            self.rad.train_batch(X_syn[idx_syn], y_syn[idx_syn])
         self._warmup_done = True
 
     def process(

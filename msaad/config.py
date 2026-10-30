@@ -16,7 +16,9 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CICIOT23_TRAIN      = os.path.join(PROJECT_ROOT, "CICIOT23", "train",      "train.csv")
 CICIOT23_TEST       = os.path.join(PROJECT_ROOT, "CICIOT23", "test",       "test.csv")
 CICIOT23_VAL        = os.path.join(PROJECT_ROOT, "CICIOT23", "validation", "validation.csv")
-IOTID20_MAIN        = os.path.join(PROJECT_ROOT, "IoTID20",  "IoT Network Intrusion Dataset.csv")
+_iotid20_default    = os.path.join(PROJECT_ROOT, "IoTID20",  "IoT Network Intrusion Dataset.csv")
+_iotid20_root       = os.path.join(PROJECT_ROOT, "IoT Network Intrusion Dataset.csv")
+IOTID20_MAIN        = _iotid20_root if os.path.exists(_iotid20_root) else _iotid20_default
 IOTID20_CYBER       = os.path.join(PROJECT_ROOT, "IoTID20",  "archive (3)", "cybersecurity_attacks.csv")
 
 RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
@@ -41,12 +43,15 @@ def ciciot23_label_to_binary(label: str) -> int | None:
 # IoTID20 main: label column is 'Label'
 IOTID20_LABEL_COL = "Label"
 IOTID20_NORMAL_LABELS = {"Normal"}
-def iotid20_label_to_binary(label: str) -> int | None:
-    label = str(label).strip()
-    if label in IOTID20_NORMAL_LABELS:
+def iotid20_label_to_binary(label: str, cat: str = "", sub_cat: str = "") -> int | None:
+    l_str = str(label).strip()
+    c_str = str(cat).strip()
+    s_str = str(sub_cat).strip()
+    if c_str in IOTID20_NORMAL_LABELS or l_str in IOTID20_NORMAL_LABELS or s_str in IOTID20_NORMAL_LABELS:
         return 0
-    # DDoS, DoS, Mirai variants
-    if any(k in label for k in ("DDoS", "DoS", "Mirai", "Flooding", "Flood")):
+    # DDoS, DoS, Mirai variants across category, subcategory, or label
+    combined = f"{l_str} {c_str} {s_str}"
+    if any(k in combined for k in ("DDoS", "DoS", "Mirai", "Flooding", "Flood")):
         return 1
     return None  # skip Scan, MITM, etc.
 
@@ -61,8 +66,8 @@ def cyber_label_to_binary(label: str) -> int | None:
         return 1
     return None
 
-# IoTID20 metadata columns to drop (non-feature)
-IOTID20_DROP_COLS = {"Flow_ID", "Src_IP", "Dst_IP", "Timestamp"}
+# IoTID20 metadata and target columns to drop (prevent feature leakage)
+IOTID20_DROP_COLS = {"Flow_ID", "Src_IP", "Dst_IP", "Timestamp", "Label", "Cat", "Sub_Cat"}
 
 # ─────────────────────────────────────────────
 #  Streaming / evaluation settings

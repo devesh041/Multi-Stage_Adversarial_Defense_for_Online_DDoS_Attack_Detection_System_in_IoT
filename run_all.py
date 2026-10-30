@@ -33,29 +33,25 @@ from msaad.evaluation import MSAADSystem, print_results_table, save_results_csv
 #  Tee: writes to both stdout and a file simultaneously
 # ─────────────────────────────────────────────────────────────
 
-class Tee:
-    """Redirect stdout writes to both the real stdout and a file."""
+class StreamTee:
+    """Redirect stream writes (stdout or stderr) to both the console and a file."""
 
-    def __init__(self, filepath: str):
-        self._file = open(filepath, "w", encoding="utf-8")
-        self._stdout = sys.stdout
+    def __init__(self, orig_stream, file_obj):
+        self.orig_stream = orig_stream
+        self.file_obj = file_obj
 
     def write(self, data: str) -> None:
-        self._stdout.write(data)
-        self._stdout.flush()
-        self._file.write(data)
-        self._file.flush()
+        self.orig_stream.write(data)
+        self.orig_stream.flush()
+        self.file_obj.write(data)
+        self.file_obj.flush()
 
     def flush(self) -> None:
-        self._stdout.flush()
-        self._file.flush()
+        self.orig_stream.flush()
+        self.file_obj.flush()
 
-    def close(self) -> None:
-        self._file.close()
-
-    # Make Tee behave like a real stream
     def fileno(self):
-        return self._stdout.fileno()
+        return self.orig_stream.fileno()
 
     def isatty(self):
         return False
@@ -69,7 +65,7 @@ def get_stream(dataset: str, split: str = "train"):
     if dataset == "ciciot23":
         return stream_ciciot23(split=split)
     elif dataset == "iotid20":
-        return stream_iotid20()
+        return stream_iotid20(split=split)
     elif dataset == "cybersecurity":
         return stream_cybersecurity()
     raise ValueError(f"Unknown dataset: {dataset!r}")
@@ -189,8 +185,11 @@ def main() -> None:
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     log_path  = os.path.join(RESULTS_DIR, f"msaad_run_{timestamp}.log")
 
-    tee = Tee(log_path)
-    sys.stdout = tee   # all print() now goes to BOTH terminal and file
+    log_file = open(log_path, "w", encoding="utf-8")
+    orig_stdout = sys.stdout
+    orig_stderr = sys.stderr
+    sys.stdout = StreamTee(orig_stdout, log_file)
+    sys.stderr = StreamTee(orig_stderr, log_file)
 
     print(f"\n{'#' * 70}")
     print(f"#  MSAAD FULL EVALUATION RUN")
@@ -221,9 +220,10 @@ def main() -> None:
     print(f"#  Total wall-clock time: {total_elapsed:.1f}s")
     print(f"{'#' * 70}\n")
 
-    # Restore stdout before exiting
-    sys.stdout = tee._stdout
-    tee.close()
+    # Restore stdout and stderr before exiting
+    sys.stdout = orig_stdout
+    sys.stderr = orig_stderr
+    log_file.close()
 
     print("\n[DONE] Evaluation completed successfully.")
 
